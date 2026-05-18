@@ -60,6 +60,15 @@ func CreateSession(name, cwd, claudeName string, command *string, tags []string,
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("failed to create tmux session: %w", err)
 	}
+
+	if worktree {
+		server.SendCommand(server.Command{
+			Type:        "fix-default-path",
+			TmuxSession: sessionName,
+			OriginalCWD: cwd,
+		})
+	}
+
 	return sessionName, nil
 }
 

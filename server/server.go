@@ -63,6 +63,8 @@ func RunServer() {
 
 	fmt.Fprintf(os.Stderr, "grecon server listening on %s\n", path)
 
+	go listenCommands()
+
 	broadcast := func(sessions []*Session) {
 		for _, s := range sessions {
 			if status, ok := pw.GetStatus(s.TmuxSession); ok {
