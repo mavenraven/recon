@@ -22,10 +22,15 @@ func main() {
 	}
 
 	newCmd := &cobra.Command{
-		Use:   "new",
+		Use:   "new [session-name]",
 		Short: "Interactive form to create a new tmux session",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name, ok := client.RunNewSessionForm()
+			var initialName string
+			if len(args) > 0 {
+				initialName = args[0]
+			}
+			name, ok := client.RunNewSessionForm(initialName)
 			if ok && name != "" {
 				client.SwitchToPane(name)
 			}

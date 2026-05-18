@@ -283,8 +283,12 @@ func (m newSessionModel) View() string {
 	return b.String()
 }
 
-func RunNewSessionForm() (string, bool) {
+func RunNewSessionForm(initialName string) (string, bool) {
 	m := newNewSessionModel()
+	if initialName != "" {
+		m.name = initialName
+		m.cursorPos = len(initialName)
+	}
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	result, err := p.Run()
 	if err != nil {
