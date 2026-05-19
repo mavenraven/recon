@@ -87,7 +87,8 @@ type Session struct {
 	ClaudeName        string            `json:"claude_name,omitempty"`
 	Subagents         []*Subagent       `json:"subagents,omitempty"`
 	Wakeup            *Wakeup           `json:"wakeup,omitempty"`
-	BackgroundTasks   []*BackgroundTask `json:"background_tasks,omitempty"`
+	BackgroundTasks   []*BackgroundTask          `json:"background_tasks,omitempty"`
+	PendingBgCalls    map[string]*BackgroundTask `json:"-"`
 }
 
 type Subagent struct {
@@ -202,6 +203,7 @@ type parsedInfo struct {
 	fileSize        uint64
 	wakeup          *Wakeup
 	backgroundTasks []*BackgroundTask
+	pendingBgCalls  map[string]*BackgroundTask
 }
 
 // --- Status debounce ---
@@ -407,13 +409,14 @@ type usageEntry struct {
 	CacheReadInputTokens     uint64 `json:"cache_read_input_tokens"`
 }
 
-func parseJSONL(path string, prevFileSize, prevInput, prevOutput uint64, prevModel, prevEffort, prevActivity string, prevWakeup *Wakeup, prevBgTasks []*BackgroundTask) parsedInfo {
+func parseJSONL(path string, prevFileSize, prevInput, prevOutput uint64, prevModel, prevEffort, prevActivity string, prevWakeup *Wakeup, prevBgTasks []*BackgroundTask, prevPending map[string]*BackgroundTask) parsedInfo {
 	f, err := os.Open(path)
 	if err != nil {
 		return parsedInfo{
 			inputTokens: prevInput, outputTokens: prevOutput,
 			model: prevModel, effort: prevEffort, lastActivity: prevActivity,
 			wakeup: prevWakeup, backgroundTasks: prevBgTasks,
+			pendingBgCalls: prevPending,
 		}
 	}
 	defer f.Close()
@@ -426,6 +429,7 @@ func parseJSONL(path string, prevFileSize, prevInput, prevOutput uint64, prevMod
 			inputTokens: prevInput, outputTokens: prevOutput,
 			model: prevModel, effort: prevEffort, lastActivity: prevActivity,
 			fileSize: fileSize, wakeup: prevWakeup, backgroundTasks: prevBgTasks,
+			pendingBgCalls: prevPending,
 		}
 	}
 
@@ -452,7 +456,10 @@ func parseJSONL(path string, prevFileSize, prevInput, prevOutput uint64, prevMod
 		bgTasks[t.TaskID] = t
 	}
 	completedTasks := make(map[string]bool)
-	pendingBgCalls := make(map[string]*BackgroundTask) // tool_use_id -> partial task
+	pendingBgCalls := make(map[string]*BackgroundTask)
+	for k, v := range prevPending {
+		pendingBgCalls[k] = v
+	}
 
 	reader := bufio.NewReaderSize(f, 64*1024)
 	for {
@@ -494,7 +501,7 @@ func parseJSONL(path string, prevFileSize, prevInput, prevOutput uint64, prevMod
 					wakeup = w
 				}
 			}
-			if strings.Contains(trimmed, `"run_in_background"`) {
+			if strings.Contains(trimmed, `"Bash"`) {
 				parseBgLaunch(trimmed, pendingBgCalls)
 			}
 			if strings.Contains(trimmed, `"Monitor"`) {
@@ -514,6 +521,8 @@ func parseJSONL(path string, prevFileSize, prevInput, prevOutput uint64, prevMod
 
 			if strings.Contains(trimmed, "Command running in background with ID:") {
 				parseBgResult(trimmed, pendingBgCalls, bgTasks)
+			} else {
+				cleanupPendingCalls(trimmed, pendingBgCalls)
 			}
 			if strings.Contains(trimmed, "Monitor started") {
 				parseMonitorResult(trimmed, pendingBgCalls, bgTasks)
@@ -579,7 +588,7 @@ func parseJSONL(path string, prevFileSize, prevInput, prevOutput uint64, prevMod
 		inputTokens: totalInput, outputTokens: totalOutput,
 		model: model, effort: effort, cwd: cwd,
 		lastActivity: lastActivity, fileSize: fileSize, wakeup: wakeup,
-		backgroundTasks: activeBg,
+		backgroundTasks: activeBg, pendingBgCalls: pendingBgCalls,
 	}
 }
 
@@ -591,9 +600,9 @@ func parseBgLaunch(line string, pending map[string]*BackgroundTask) {
 				ID    string `json:"id"`
 				Name  string `json:"name"`
 				Input struct {
-					Command            string `json:"command"`
-					Description        string `json:"description"`
-					RunInBackground    bool   `json:"run_in_background"`
+					Command         string `json:"command"`
+					Description     string `json:"description"`
+					RunInBackground bool   `json:"run_in_background"`
 				} `json:"input"`
 			} `json:"content"`
 		} `json:"message"`
@@ -603,12 +612,32 @@ func parseBgLaunch(line string, pending map[string]*BackgroundTask) {
 		return
 	}
 	for _, c := range entry.Message.Content {
-		if c.Name == "Bash" && c.Input.RunInBackground && c.ID != "" {
+		if c.Name == "Bash" && c.ID != "" && c.Input.Command != "" {
 			pending[c.ID] = &BackgroundTask{
 				Kind:        BgShell,
 				Description: c.Input.Description,
 				Command:     c.Input.Command,
 			}
+		}
+	}
+}
+
+func cleanupPendingCalls(line string, pending map[string]*BackgroundTask) {
+	type resultEntry struct {
+		Message struct {
+			Content []struct {
+				Type      string `json:"type"`
+				ToolUseID string `json:"tool_use_id"`
+			} `json:"content"`
+		} `json:"message"`
+	}
+	var entry resultEntry
+	if json.Unmarshal([]byte(line), &entry) != nil {
+		return
+	}
+	for _, c := range entry.Message.Content {
+		if c.Type == "tool_result" && c.ToolUseID != "" {
+			delete(pending, c.ToolUseID)
 		}
 	}
 }
@@ -939,6 +968,7 @@ func DiscoverSessions(prevSessions map[string]*Session) []*Session {
 			var prevModel, prevEffort, prevAct string
 			var prevWakeup *Wakeup
 			var prevBgTasks []*BackgroundTask
+			var prevPending map[string]*BackgroundTask
 			if prev != nil {
 				prevSize = prev.LastFileSize
 				prevIn = prev.TotalInputTokens
@@ -948,9 +978,10 @@ func DiscoverSessions(prevSessions map[string]*Session) []*Session {
 				prevAct = prev.LastActivity
 				prevWakeup = prev.Wakeup
 				prevBgTasks = prev.BackgroundTasks
+				prevPending = prev.PendingBgCalls
 			}
 
-			info := parseJSONL(path, prevSize, prevIn, prevOut, prevModel, prevEffort, prevAct, prevWakeup, prevBgTasks)
+			info := parseJSONL(path, prevSize, prevIn, prevOut, prevModel, prevEffort, prevAct, prevWakeup, prevBgTasks, prevPending)
 			markBgTaskLiveness(info.backgroundTasks, live.pid, pt)
 			info.backgroundTasks = pruneStaleBgTasks(info.backgroundTasks)
 			cwd := info.cwd
@@ -994,6 +1025,7 @@ func DiscoverSessions(prevSessions map[string]*Session) []*Session {
 				ClaudeName:        claudeName,
 				Wakeup:            info.wakeup,
 				BackgroundTasks:   info.backgroundTasks,
+				PendingBgCalls:    info.pendingBgCalls,
 			}
 		}(i, c[0], c[1], c[2])
 	}
@@ -1047,6 +1079,7 @@ func DiscoverSessions(prevSessions map[string]*Session) []*Session {
 				var prevModel, prevEffort, prevAct string
 				var prevWakeup *Wakeup
 				var prevBgTasks []*BackgroundTask
+				var prevPending map[string]*BackgroundTask
 				if prev != nil {
 					prevSize = prev.LastFileSize
 					prevIn = prev.TotalInputTokens
@@ -1056,9 +1089,10 @@ func DiscoverSessions(prevSessions map[string]*Session) []*Session {
 					prevAct = prev.LastActivity
 					prevWakeup = prev.Wakeup
 					prevBgTasks = prev.BackgroundTasks
+					prevPending = prev.PendingBgCalls
 				}
 
-				info := parseJSONL(resolvedPath, prevSize, prevIn, prevOut, prevModel, prevEffort, prevAct, prevWakeup, prevBgTasks)
+				info := parseJSONL(resolvedPath, prevSize, prevIn, prevOut, prevModel, prevEffort, prevAct, prevWakeup, prevBgTasks, prevPending)
 				markBgTaskLiveness(info.backgroundTasks, live.pid, pt)
 			info.backgroundTasks = pruneStaleBgTasks(info.backgroundTasks)
 				cwd := info.cwd
@@ -1097,7 +1131,8 @@ func DiscoverSessions(prevSessions map[string]*Session) []*Session {
 					Subagents:         subagents,
 					ClaudeName:        claudeName,
 					Wakeup:            info.wakeup,
-				BackgroundTasks:   info.backgroundTasks,
+					BackgroundTasks:   info.backgroundTasks,
+					PendingBgCalls:    info.pendingBgCalls,
 				}
 			} else {
 				SaveTmuxName(sessionID, live.tmuxSession)
@@ -1236,6 +1271,20 @@ func (pt *processTree) descendantArgs(pid int) []string {
 
 const bgTaskDeadTTL = 2 * time.Minute
 
+func bgCommandFragments(cmd string) []string {
+	first := cmd
+	if idx := strings.IndexByte(cmd, '|'); idx >= 0 {
+		first = cmd[:idx]
+	}
+	first = strings.TrimSpace(first)
+	first = strings.TrimSuffix(first, "2>&1")
+	first = strings.TrimSpace(first)
+	if first == "" {
+		return nil
+	}
+	return []string{first, cmd}
+}
+
 func markBgTaskLiveness(tasks []*BackgroundTask, sessionPID int, pt *processTree) {
 	if len(tasks) == 0 || pt == nil {
 		return
@@ -1245,9 +1294,15 @@ func markBgTaskLiveness(tasks []*BackgroundTask, sessionPID int, pt *processTree
 	for _, t := range tasks {
 		alive := false
 		if t.Command != "" {
+			frags := bgCommandFragments(t.Command)
 			for _, a := range descArgs {
-				if strings.Contains(a, t.Command) {
-					alive = true
+				for _, frag := range frags {
+					if strings.Contains(a, frag) {
+						alive = true
+						break
+					}
+				}
+				if alive {
 					break
 				}
 			}
