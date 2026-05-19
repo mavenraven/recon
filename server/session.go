@@ -108,6 +108,8 @@ type BackgroundTask struct {
 	TaskID      string `json:"task_id"`
 	Description string `json:"description"`
 	Command     string `json:"command"`
+	OutputPath  string `json:"output_path,omitempty"`
+	Alive       bool   `json:"alive"`
 }
 
 func (s *Session) RoomID() string {
@@ -411,6 +413,7 @@ func parseJSONL(path string, prevFileSize, prevInput, prevOutput uint64, prevMod
 	fileSize := uint64(stat.Size())
 
 	if fileSize == prevFileSize && prevFileSize > 0 {
+		refreshBgLiveness(prevBgTasks)
 		return parsedInfo{
 			inputTokens: prevInput, outputTokens: prevOutput,
 			model: prevModel, effort: prevEffort, lastActivity: prevActivity,
@@ -554,6 +557,7 @@ func parseJSONL(path string, prevFileSize, prevInput, prevOutput uint64, prevMod
 	var activeBg []*BackgroundTask
 	for _, t := range bgTasks {
 		if !completedTasks[t.TaskID] {
+			t.Alive = isTaskAlive(t.OutputPath)
 			activeBg = append(activeBg, t)
 		}
 	}
@@ -596,46 +600,59 @@ func parseBgLaunch(line string, pending map[string]*BackgroundTask) {
 }
 
 func parseBgResult(line string, pending map[string]*BackgroundTask, bgTasks map[string]*BackgroundTask) {
-	prefix := "Command running in background with ID: "
-	idx := strings.Index(line, prefix)
-	if idx < 0 {
-		return
-	}
-	rest := line[idx+len(prefix):]
-	dot := strings.IndexByte(rest, '.')
-	if dot < 0 {
-		return
-	}
-	taskID := rest[:dot]
-	if taskID == "" {
-		return
-	}
-
-	task := &BackgroundTask{TaskID: taskID}
-
 	type resultEntry struct {
 		Message struct {
 			Content []struct {
+				Type      string `json:"type"`
 				ToolUseID string `json:"tool_use_id"`
 				Content   string `json:"content"`
 			} `json:"content"`
 		} `json:"message"`
 	}
 	var entry resultEntry
-	if json.Unmarshal([]byte(line), &entry) == nil {
-		for _, c := range entry.Message.Content {
-			if strings.Contains(c.Content, taskID) && c.ToolUseID != "" {
-				if p, ok := pending[c.ToolUseID]; ok {
-					task.Description = p.Description
-					task.Command = p.Command
-					delete(pending, c.ToolUseID)
-				}
-				break
-			}
-		}
+	if json.Unmarshal([]byte(line), &entry) != nil {
+		return
 	}
 
-	bgTasks[taskID] = task
+	prefix := "Command running in background with ID: "
+	for _, c := range entry.Message.Content {
+		if c.Type != "tool_result" || c.ToolUseID == "" {
+			continue
+		}
+		idx := strings.Index(c.Content, prefix)
+		if idx < 0 {
+			continue
+		}
+		rest := c.Content[idx+len(prefix):]
+		dot := strings.IndexByte(rest, '.')
+		if dot < 0 || dot > 20 {
+			continue
+		}
+		taskID := rest[:dot]
+		if !isValidTaskID(taskID) {
+			continue
+		}
+
+		task := &BackgroundTask{TaskID: taskID}
+		if pathPrefix := "Output is being written to: "; true {
+			if pi := strings.Index(rest, pathPrefix); pi >= 0 {
+				pathStr := rest[pi+len(pathPrefix):]
+				if end := strings.IndexAny(pathStr, "\"\n"); end >= 0 {
+					pathStr = pathStr[:end]
+				}
+				task.OutputPath = strings.TrimSpace(pathStr)
+			}
+		}
+
+		if p, ok := pending[c.ToolUseID]; ok {
+			task.Description = p.Description
+			task.Command = p.Command
+			delete(pending, c.ToolUseID)
+		}
+
+		bgTasks[taskID] = task
+		return
+	}
 }
 
 func extractTaskNotificationID(line string) string {
@@ -683,6 +700,32 @@ func parseWakeup(line, timestamp string) *Wakeup {
 		}
 	}
 	return nil
+}
+
+func isValidTaskID(id string) bool {
+	if len(id) < 5 || len(id) > 15 {
+		return false
+	}
+	for _, r := range id {
+		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')) {
+			return false
+		}
+	}
+	return true
+}
+
+func refreshBgLiveness(tasks []*BackgroundTask) {
+	for _, t := range tasks {
+		t.Alive = isTaskAlive(t.OutputPath)
+	}
+}
+
+func isTaskAlive(outputPath string) bool {
+	if outputPath == "" {
+		return false
+	}
+	err := exec.Command("lsof", outputPath).Run()
+	return err == nil
 }
 
 func stripANSI(s string) string {
