@@ -3,6 +3,7 @@ package client
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -29,12 +30,17 @@ type newSessionModel struct {
 	height     int
 }
 
+func isGitRepo(dir string) bool {
+	return exec.Command("git", "-C", dir, "rev-parse", "--git-dir").Run() == nil
+}
+
 func newNewSessionModel() newSessionModel {
 	name, cwd := DefaultNewSessionInfo()
 	return newSessionModel{
 		name:       name,
 		claudeName: GenerateFunName(),
 		cwd:        cwd,
+		worktree:   isGitRepo(cwd),
 		cursorPos:  len(name),
 		active:     fieldName,
 	}

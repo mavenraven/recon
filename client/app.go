@@ -16,12 +16,14 @@ const (
 	RowHeader RowKind = iota
 	RowAgent
 	RowSubagent
+	RowWakeup
 )
 
 type DisplayRow struct {
 	Kind        RowKind
 	Session     *server.Session
 	Subagent    *server.Subagent
+	Wakeup      *server.Wakeup
 	Header      string
 	IsLast      bool
 	AgentIsLast bool
@@ -124,10 +126,18 @@ func buildDisplayRows(sessions []*server.Session) []DisplayRow {
 				Kind: RowAgent, Session: s,
 				IsLast: lastAgent,
 			})
+			hasWakeup := s.Wakeup != nil && s.Wakeup.FiresAt.After(time.Now())
 			for j, sa := range s.Subagents {
 				rows = append(rows, DisplayRow{
 					Kind: RowSubagent, Session: s, Subagent: sa,
-					IsLast:      j == len(s.Subagents)-1,
+					IsLast:      j == len(s.Subagents)-1 && !hasWakeup,
+					AgentIsLast: lastAgent,
+				})
+			}
+			if hasWakeup {
+				rows = append(rows, DisplayRow{
+					Kind: RowWakeup, Session: s, Wakeup: s.Wakeup,
+					IsLast:      true,
 					AgentIsLast: lastAgent,
 				})
 			}

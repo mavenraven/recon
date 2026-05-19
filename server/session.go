@@ -86,6 +86,7 @@ type Session struct {
 	Summary           string            `json:"summary,omitempty"`
 	ClaudeName        string            `json:"claude_name,omitempty"`
 	Subagents         []*Subagent       `json:"subagents,omitempty"`
+	Wakeup            *Wakeup           `json:"wakeup,omitempty"`
 }
 
 type Subagent struct {
@@ -95,6 +96,11 @@ type Subagent struct {
 	JSONLPath   string        `json:"jsonl_path"`
 	Status      SessionStatus `json:"status"`
 	Summary     string        `json:"summary,omitempty"`
+}
+
+type Wakeup struct {
+	Reason  string    `json:"reason"`
+	FiresAt time.Time `json:"fires_at"`
 }
 
 func (s *Session) RoomID() string {
@@ -176,6 +182,7 @@ type parsedInfo struct {
 	cwd          string
 	lastActivity string
 	fileSize     uint64
+	wakeup       *Wakeup
 }
 
 // --- Status debounce ---
@@ -381,12 +388,13 @@ type usageEntry struct {
 	CacheReadInputTokens     uint64 `json:"cache_read_input_tokens"`
 }
 
-func parseJSONL(path string, prevFileSize, prevInput, prevOutput uint64, prevModel, prevEffort, prevActivity string) parsedInfo {
+func parseJSONL(path string, prevFileSize, prevInput, prevOutput uint64, prevModel, prevEffort, prevActivity string, prevWakeup *Wakeup) parsedInfo {
 	f, err := os.Open(path)
 	if err != nil {
 		return parsedInfo{
 			inputTokens: prevInput, outputTokens: prevOutput,
 			model: prevModel, effort: prevEffort, lastActivity: prevActivity,
+			wakeup: prevWakeup,
 		}
 	}
 	defer f.Close()
@@ -398,7 +406,7 @@ func parseJSONL(path string, prevFileSize, prevInput, prevOutput uint64, prevMod
 		return parsedInfo{
 			inputTokens: prevInput, outputTokens: prevOutput,
 			model: prevModel, effort: prevEffort, lastActivity: prevActivity,
-			fileSize: fileSize,
+			fileSize: fileSize, wakeup: prevWakeup,
 		}
 	}
 
@@ -418,6 +426,8 @@ func parseJSONL(path string, prevFileSize, prevInput, prevOutput uint64, prevMod
 		effort = ""
 		lastActivity = ""
 	}
+
+	var wakeup *Wakeup
 
 	reader := bufio.NewReaderSize(f, 64*1024)
 	for {
@@ -452,6 +462,11 @@ func parseJSONL(path string, prevFileSize, prevInput, prevOutput uint64, prevMod
 				if u := entry.Message.Usage; u != nil {
 					totalInput = u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
 					totalOutput = u.OutputTokens
+				}
+			}
+			if strings.Contains(trimmed, `"ScheduleWakeup"`) {
+				if w := parseWakeup(trimmed, entry.Timestamp); w != nil {
+					wakeup = w
 				}
 			}
 		} else if strings.Contains(trimmed, `"type":"user"`) || strings.Contains(trimmed, `"type":"system"`) {
@@ -506,11 +521,49 @@ func parseJSONL(path string, prevFileSize, prevInput, prevOutput uint64, prevMod
 		}
 	}
 
+	if wakeup != nil && wakeup.FiresAt.Before(time.Now()) {
+		wakeup = nil
+	}
+
 	return parsedInfo{
 		inputTokens: totalInput, outputTokens: totalOutput,
 		model: model, effort: effort, cwd: cwd,
-		lastActivity: lastActivity, fileSize: fileSize,
+		lastActivity: lastActivity, fileSize: fileSize, wakeup: wakeup,
 	}
+}
+
+func parseWakeup(line, timestamp string) *Wakeup {
+	type wakeupEntry struct {
+		Message struct {
+			Content []struct {
+				Name  string `json:"name"`
+				Input struct {
+					DelaySeconds float64 `json:"delaySeconds"`
+					Reason       string  `json:"reason"`
+				} `json:"input"`
+			} `json:"content"`
+		} `json:"message"`
+	}
+	var entry wakeupEntry
+	if json.Unmarshal([]byte(line), &entry) != nil {
+		return nil
+	}
+	for _, c := range entry.Message.Content {
+		if c.Name == "ScheduleWakeup" && c.Input.DelaySeconds > 0 {
+			ts, err := time.Parse(time.RFC3339Nano, timestamp)
+			if err != nil {
+				ts, err = time.Parse(time.RFC3339, timestamp)
+				if err != nil {
+					return nil
+				}
+			}
+			return &Wakeup{
+				Reason:  c.Input.Reason,
+				FiresAt: ts.Add(time.Duration(c.Input.DelaySeconds) * time.Second),
+			}
+		}
+	}
+	return nil
 }
 
 func stripANSI(s string) string {
@@ -647,6 +700,7 @@ func DiscoverSessions(prevSessions map[string]*Session) []*Session {
 
 			var prevSize, prevIn, prevOut uint64
 			var prevModel, prevEffort, prevAct string
+			var prevWakeup *Wakeup
 			if prev != nil {
 				prevSize = prev.LastFileSize
 				prevIn = prev.TotalInputTokens
@@ -654,9 +708,10 @@ func DiscoverSessions(prevSessions map[string]*Session) []*Session {
 				prevModel = prev.Model
 				prevEffort = prev.Effort
 				prevAct = prev.LastActivity
+				prevWakeup = prev.Wakeup
 			}
 
-			info := parseJSONL(path, prevSize, prevIn, prevOut, prevModel, prevEffort, prevAct)
+			info := parseJSONL(path, prevSize, prevIn, prevOut, prevModel, prevEffort, prevAct, prevWakeup)
 			cwd := info.cwd
 			if cwd == "" && prev != nil {
 				cwd = prev.CWD
@@ -696,6 +751,7 @@ func DiscoverSessions(prevSessions map[string]*Session) []*Session {
 				SubagentCount:     len(subagents),
 				Subagents:         subagents,
 				ClaudeName:        claudeName,
+				Wakeup:            info.wakeup,
 			}
 		}(i, c[0], c[1], c[2])
 	}
@@ -747,6 +803,7 @@ func DiscoverSessions(prevSessions map[string]*Session) []*Session {
 				prev := prevSessions[sessionID]
 				var prevSize, prevIn, prevOut uint64
 				var prevModel, prevEffort, prevAct string
+				var prevWakeup *Wakeup
 				if prev != nil {
 					prevSize = prev.LastFileSize
 					prevIn = prev.TotalInputTokens
@@ -754,9 +811,10 @@ func DiscoverSessions(prevSessions map[string]*Session) []*Session {
 					prevModel = prev.Model
 					prevEffort = prev.Effort
 					prevAct = prev.LastActivity
+					prevWakeup = prev.Wakeup
 				}
 
-				info := parseJSONL(resolvedPath, prevSize, prevIn, prevOut, prevModel, prevEffort, prevAct)
+				info := parseJSONL(resolvedPath, prevSize, prevIn, prevOut, prevModel, prevEffort, prevAct, prevWakeup)
 				cwd := info.cwd
 				if cwd == "" {
 					cwd = live.paneCWD
@@ -792,6 +850,7 @@ func DiscoverSessions(prevSessions map[string]*Session) []*Session {
 					SubagentCount:     len(subagents),
 					Subagents:         subagents,
 					ClaudeName:        claudeName,
+					Wakeup:            info.wakeup,
 				}
 			} else {
 				SaveTmuxName(sessionID, live.tmuxSession)

@@ -279,6 +279,58 @@ func renderTable(b *strings.Builder, app *App, width, contentHeight int) {
 			b.WriteString("│")
 			b.WriteString(rowStr)
 			b.WriteString("│\n")
+
+		case RowWakeup:
+			w := row.Wakeup
+
+			var vbar string
+			if row.AgentIsLast {
+				vbar = "   "
+			} else {
+				vbar = " │ "
+			}
+			var branch string
+			if row.IsLast {
+				branch = " └ "
+			} else {
+				branch = " ├ "
+			}
+			prefix := vbar + branch
+
+			remaining := time.Until(w.FiresAt)
+			var countdown string
+			if remaining > 0 {
+				mins := int(remaining.Minutes())
+				secs := int(remaining.Seconds()) % 60
+				if mins > 0 {
+					countdown = fmt.Sprintf("%dm%ds", mins, secs)
+				} else {
+					countdown = fmt.Sprintf("%ds", secs)
+				}
+			} else {
+				countdown = "now"
+			}
+
+			nameCol := ansiColor("90", prefix) + ansiColor("35", "wakeup in "+countdown)
+			statusCol := ansiColor("35", "● Sleep")
+
+			summaryCol := w.Reason
+			if summaryCol == "" {
+				summaryCol = ansiColor("90", "—")
+			}
+
+			rowStr := padCol(nameCol, colName) +
+				padCol(statusCol, colStatus) +
+				padCol(summaryCol, colSummary)
+
+			plainLen := visibleWidth(rowStr)
+			if plainLen < innerW {
+				rowStr += strings.Repeat(" ", innerW-plainLen)
+			}
+
+			b.WriteString("│")
+			b.WriteString(rowStr)
+			b.WriteString("│\n")
 		}
 	}
 
