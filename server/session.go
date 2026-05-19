@@ -119,6 +119,7 @@ type BackgroundTask struct {
 	Command     string     `json:"command"`
 	OutputPath  string     `json:"output_path,omitempty"`
 	Alive       bool       `json:"alive"`
+	SeenAlive   bool       `json:"-"`
 	DeadSince   time.Time  `json:"dead_since,omitempty"`
 }
 
@@ -1307,6 +1308,7 @@ func markBgTaskLiveness(tasks []*BackgroundTask, sessionPID int, pt *processTree
 		}
 		t.Alive = alive
 		if alive {
+			t.SeenAlive = true
 			t.DeadSince = time.Time{}
 		} else if t.DeadSince.IsZero() {
 			t.DeadSince = now
@@ -1318,6 +1320,9 @@ func pruneStaleBgTasks(tasks []*BackgroundTask) []*BackgroundTask {
 	now := time.Now()
 	var kept []*BackgroundTask
 	for _, t := range tasks {
+		if !t.Alive && !t.SeenAlive {
+			continue
+		}
 		if !t.DeadSince.IsZero() && now.Sub(t.DeadSince) > bgTaskDeadTTL {
 			continue
 		}
