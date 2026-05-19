@@ -104,13 +104,21 @@ type Wakeup struct {
 	FiresAt time.Time `json:"fires_at"`
 }
 
+type BgTaskKind string
+
+const (
+	BgShell   BgTaskKind = "shell"
+	BgMonitor BgTaskKind = "monitor"
+)
+
 type BackgroundTask struct {
-	TaskID      string    `json:"task_id"`
-	Description string    `json:"description"`
-	Command     string    `json:"command"`
-	OutputPath  string    `json:"output_path,omitempty"`
-	Alive       bool      `json:"alive"`
-	DeadSince   time.Time `json:"dead_since,omitempty"`
+	TaskID      string     `json:"task_id"`
+	Kind        BgTaskKind `json:"kind"`
+	Description string     `json:"description"`
+	Command     string     `json:"command"`
+	OutputPath  string     `json:"output_path,omitempty"`
+	Alive       bool       `json:"alive"`
+	DeadSince   time.Time  `json:"dead_since,omitempty"`
 }
 
 func (s *Session) RoomID() string {
@@ -489,6 +497,9 @@ func parseJSONL(path string, prevFileSize, prevInput, prevOutput uint64, prevMod
 			if strings.Contains(trimmed, `"run_in_background"`) {
 				parseBgLaunch(trimmed, pendingBgCalls)
 			}
+			if strings.Contains(trimmed, `"Monitor"`) {
+				parseMonitorLaunch(trimmed, pendingBgCalls)
+			}
 		} else if strings.Contains(trimmed, `"type":"user"`) || strings.Contains(trimmed, `"type":"system"`) {
 			var entry jsonlEntry
 			if json.Unmarshal([]byte(trimmed), &entry) != nil {
@@ -503,6 +514,9 @@ func parseJSONL(path string, prevFileSize, prevInput, prevOutput uint64, prevMod
 
 			if strings.Contains(trimmed, "Command running in background with ID:") {
 				parseBgResult(trimmed, pendingBgCalls, bgTasks)
+			}
+			if strings.Contains(trimmed, "Monitor started") {
+				parseMonitorResult(trimmed, pendingBgCalls, bgTasks)
 			}
 			if strings.Contains(trimmed, "<task-notification>") {
 				if tid := extractTaskNotificationID(trimmed); tid != "" {
@@ -591,6 +605,7 @@ func parseBgLaunch(line string, pending map[string]*BackgroundTask) {
 	for _, c := range entry.Message.Content {
 		if c.Name == "Bash" && c.Input.RunInBackground && c.ID != "" {
 			pending[c.ID] = &BackgroundTask{
+				Kind:        BgShell,
 				Description: c.Input.Description,
 				Command:     c.Input.Command,
 			}
@@ -632,7 +647,7 @@ func parseBgResult(line string, pending map[string]*BackgroundTask, bgTasks map[
 			continue
 		}
 
-		task := &BackgroundTask{TaskID: taskID}
+		task := &BackgroundTask{TaskID: taskID, Kind: BgShell}
 		if pathPrefix := "Output is being written to: "; true {
 			if pi := strings.Index(rest, pathPrefix); pi >= 0 {
 				pathStr := rest[pi+len(pathPrefix):]
@@ -643,6 +658,81 @@ func parseBgResult(line string, pending map[string]*BackgroundTask, bgTasks map[
 			}
 		}
 
+		if p, ok := pending[c.ToolUseID]; ok {
+			task.Description = p.Description
+			task.Command = p.Command
+			delete(pending, c.ToolUseID)
+		}
+
+		bgTasks[taskID] = task
+		return
+	}
+}
+
+func parseMonitorLaunch(line string, pending map[string]*BackgroundTask) {
+	type monEntry struct {
+		Message struct {
+			Content []struct {
+				Type  string `json:"type"`
+				ID    string `json:"id"`
+				Name  string `json:"name"`
+				Input struct {
+					Command     string `json:"command"`
+					Description string `json:"description"`
+				} `json:"input"`
+			} `json:"content"`
+		} `json:"message"`
+	}
+	var entry monEntry
+	if json.Unmarshal([]byte(line), &entry) != nil {
+		return
+	}
+	for _, c := range entry.Message.Content {
+		if c.Name == "Monitor" && c.ID != "" {
+			pending[c.ID] = &BackgroundTask{
+				Kind:        BgMonitor,
+				Description: c.Input.Description,
+				Command:     c.Input.Command,
+			}
+		}
+	}
+}
+
+func parseMonitorResult(line string, pending map[string]*BackgroundTask, bgTasks map[string]*BackgroundTask) {
+	type resultEntry struct {
+		Message struct {
+			Content []struct {
+				Type      string `json:"type"`
+				ToolUseID string `json:"tool_use_id"`
+				Content   string `json:"content"`
+			} `json:"content"`
+		} `json:"message"`
+	}
+	var entry resultEntry
+	if json.Unmarshal([]byte(line), &entry) != nil {
+		return
+	}
+
+	prefix := "Monitor started (task "
+	for _, c := range entry.Message.Content {
+		if c.Type != "tool_result" || c.ToolUseID == "" {
+			continue
+		}
+		idx := strings.Index(c.Content, prefix)
+		if idx < 0 {
+			continue
+		}
+		rest := c.Content[idx+len(prefix):]
+		comma := strings.IndexByte(rest, ',')
+		if comma < 0 || comma > 20 {
+			continue
+		}
+		taskID := rest[:comma]
+		if !isValidTaskID(taskID) {
+			continue
+		}
+
+		task := &BackgroundTask{TaskID: taskID, Kind: BgMonitor}
 		if p, ok := pending[c.ToolUseID]; ok {
 			task.Description = p.Description
 			task.Command = p.Command

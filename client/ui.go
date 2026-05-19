@@ -297,12 +297,17 @@ func renderTable(b *strings.Builder, app *App, width, contentHeight int) {
 			}
 			prefix := vbar + branch
 
+			label := string(bt.Kind)
+			if label == "" {
+				label = "shell"
+			}
+
 			var nameCol, statusCol string
 			if bt.Alive {
-				nameCol = ansiColor("90", prefix) + ansiColor("33", "background")
+				nameCol = ansiColor("90", prefix) + ansiColor("33", label)
 				statusCol = ansiColor("33", "● Run")
 			} else {
-				nameCol = ansiColor("90", prefix) + ansiColor("90", "background")
+				nameCol = ansiColor("90", prefix) + ansiColor("90", label)
 				statusCol = ansiColor("90", "● Dead")
 			}
 
