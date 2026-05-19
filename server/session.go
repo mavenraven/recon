@@ -427,7 +427,7 @@ func parseJSONL(path string, prevFileSize, prevInput, prevOutput uint64, prevMod
 		lastActivity = ""
 	}
 
-	var wakeup *Wakeup
+	wakeup := prevWakeup
 
 	reader := bufio.NewReaderSize(f, 64*1024)
 	for {
