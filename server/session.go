@@ -105,11 +105,12 @@ type Wakeup struct {
 }
 
 type BackgroundTask struct {
-	TaskID      string `json:"task_id"`
-	Description string `json:"description"`
-	Command     string `json:"command"`
-	OutputPath  string `json:"output_path,omitempty"`
-	Alive       bool   `json:"alive"`
+	TaskID      string    `json:"task_id"`
+	Description string    `json:"description"`
+	Command     string    `json:"command"`
+	OutputPath  string    `json:"output_path,omitempty"`
+	Alive       bool      `json:"alive"`
+	DeadSince   time.Time `json:"dead_since,omitempty"`
 }
 
 func (s *Session) RoomID() string {
@@ -861,6 +862,7 @@ func DiscoverSessions(prevSessions map[string]*Session) []*Session {
 
 			info := parseJSONL(path, prevSize, prevIn, prevOut, prevModel, prevEffort, prevAct, prevWakeup, prevBgTasks)
 			markBgTaskLiveness(info.backgroundTasks, live.pid, pt)
+			info.backgroundTasks = pruneStaleBgTasks(info.backgroundTasks)
 			cwd := info.cwd
 			if cwd == "" && prev != nil {
 				cwd = prev.CWD
@@ -968,6 +970,7 @@ func DiscoverSessions(prevSessions map[string]*Session) []*Session {
 
 				info := parseJSONL(resolvedPath, prevSize, prevIn, prevOut, prevModel, prevEffort, prevAct, prevWakeup, prevBgTasks)
 				markBgTaskLiveness(info.backgroundTasks, live.pid, pt)
+			info.backgroundTasks = pruneStaleBgTasks(info.backgroundTasks)
 				cwd := info.cwd
 				if cwd == "" {
 					cwd = live.paneCWD
@@ -1141,23 +1144,44 @@ func (pt *processTree) descendantArgs(pid int) []string {
 	return result
 }
 
+const bgTaskDeadTTL = 2 * time.Minute
+
 func markBgTaskLiveness(tasks []*BackgroundTask, sessionPID int, pt *processTree) {
 	if len(tasks) == 0 || pt == nil {
 		return
 	}
 	descArgs := pt.descendantArgs(sessionPID)
+	now := time.Now()
 	for _, t := range tasks {
 		if t.Command == "" {
 			continue
 		}
-		t.Alive = false
+		alive := false
 		for _, a := range descArgs {
 			if strings.Contains(a, t.Command) {
-				t.Alive = true
+				alive = true
 				break
 			}
 		}
+		t.Alive = alive
+		if alive {
+			t.DeadSince = time.Time{}
+		} else if t.DeadSince.IsZero() {
+			t.DeadSince = now
+		}
 	}
+}
+
+func pruneStaleBgTasks(tasks []*BackgroundTask) []*BackgroundTask {
+	now := time.Now()
+	var kept []*BackgroundTask
+	for _, t := range tasks {
+		if !t.DeadSince.IsZero() && now.Sub(t.DeadSince) > bgTaskDeadTTL {
+			continue
+		}
+		kept = append(kept, t)
+	}
+	return kept
 }
 
 func processPaneLines(paneOutput string, childrenMap map[int][]int) (claudePanes [][4]string, sessionNames []string) {
