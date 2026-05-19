@@ -28,6 +28,14 @@ func CreateSession(name, cwd, claudeName string, command *string, tags []string,
 		return "", fmt.Errorf("invalid working directory: %s", cwd)
 	}
 
+	if worktree && command == nil {
+		wtPath, err := createWorktreeFromMain(cwd, claudeName)
+		if err == nil {
+			cwd = wtPath
+			worktree = false
+		}
+	}
+
 	baseName := sanitizeSessionName(name)
 	sessionName := uniqueSessionName(baseName)
 
@@ -59,13 +67,6 @@ func CreateSession(name, cwd, claudeName string, command *string, tags []string,
 	cmd := exec.Command("tmux", args...)
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("failed to create tmux session: %w", err)
-	}
-
-	if worktree {
-		server.SendCommand(server.Command{
-			Type:        "fix-default-path",
-			TmuxSession: sessionName,
-		})
 	}
 
 	return sessionName, nil
@@ -107,6 +108,33 @@ func ResumeSession(sessionID string, name *string) (string, error) {
 		return "", fmt.Errorf("failed to create tmux session: %w", err)
 	}
 	return sessionName, nil
+}
+
+func createWorktreeFromMain(cwd, branchName string) (string, error) {
+	repoRoot, err := exec.Command("git", "-C", cwd, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return "", err
+	}
+	root := strings.TrimSpace(string(repoRoot))
+
+	var base string
+	for _, candidate := range []string{"main", "master"} {
+		if exec.Command("git", "-C", root, "rev-parse", "--verify", candidate).Run() == nil {
+			base = candidate
+			break
+		}
+	}
+	if base == "" {
+		return "", fmt.Errorf("no main/master branch found")
+	}
+
+	wtDir := filepath.Join(root, ".claude", "worktrees", branchName)
+	wtBranch := "worktree-" + branchName
+
+	if err := exec.Command("git", "-C", root, "worktree", "add", "-b", wtBranch, wtDir, base).Run(); err != nil {
+		return "", err
+	}
+	return wtDir, nil
 }
 
 func DefaultNewSessionInfo() (string, string) {
