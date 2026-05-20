@@ -50,8 +50,6 @@ bind g run-shell 'tmux kill-session -t _grecon 2>/dev/null; \
   tmux new-session -d -s _grecon grecon; \
   tmux switch-client -t _grecon'
 
-# prefix + f → jump to next agent waiting for input
-bind f run-shell 'grecon next'
 ```
 
 Reload with `tmux source ~/.tmux.conf`.
@@ -72,7 +70,19 @@ Or launch headlessly:
 grecon launch --cwd ~/repos/myapp --worktree --attach
 ```
 
-### 5. Open the dashboard
+### 5. Resume a past session
+
+```bash
+grecon resume
+```
+
+This opens a picker showing all your past Claude Code sessions — pick one to resume it in a new tmux session. You can also resume by ID:
+
+```bash
+grecon resume --id <session-id>
+```
+
+### 6. Open the dashboard
 
 Press your tmux prefix + `g` (or run `grecon` directly). You'll see all your running Claude Code sessions, their status, and what they're working on. Press `i` to jump straight to whichever agent needs your attention.
 
@@ -101,7 +111,6 @@ Nested under each agent, grecon shows its active child tasks:
 | `grecon new [name]` | Interactive form to create a new session |
 | `grecon launch` | Create a session (background, scriptable) |
 | `grecon resume` | Interactive picker to resume a past session |
-| `grecon next` | Jump to the next agent waiting for input |
 | `grecon server` | Start the background server |
 
 ### `grecon launch` flags

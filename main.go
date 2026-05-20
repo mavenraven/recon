@@ -122,24 +122,6 @@ func main() {
 	resumeCmd.Flags().StringVar(&resumeName, "name", "", "Custom tmux session name")
 	resumeCmd.Flags().BoolVar(&resumeNoAttach, "no-attach", false, "Don't attach after resuming")
 
-	nextCmd := &cobra.Command{
-		Use:   "next",
-		Short: "Jump to the next agent waiting for input",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			app := client.NewApp()
-			if err := app.Refresh(); err != nil {
-				return err
-			}
-			for _, s := range app.Sessions {
-				if s.Status == server.StatusInput && s.PaneTarget != "" {
-					client.SwitchToPane(s.PaneTarget)
-					return nil
-				}
-			}
-			return nil
-		},
-	}
-
 	serverCmd := &cobra.Command{
 		Use:   "server",
 		Short: "Run a background server that caches session data",
@@ -148,7 +130,7 @@ func main() {
 		},
 	}
 
-	rootCmd.AddCommand(newCmd, launchCmd, resumeCmd, nextCmd, serverCmd)
+	rootCmd.AddCommand(newCmd, launchCmd, resumeCmd, serverCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
