@@ -522,11 +522,10 @@ func parseJSONL(path string, prevFileSize, prevInput, prevOutput uint64, prevMod
 
 			if strings.Contains(trimmed, "Command running in background with ID:") {
 				parseBgResult(trimmed, pendingBgCalls, bgTasks)
+			} else if strings.Contains(trimmed, "Monitor started") {
+				parseMonitorResult(trimmed, pendingBgCalls, bgTasks)
 			} else {
 				cleanupPendingCalls(trimmed, pendingBgCalls)
-			}
-			if strings.Contains(trimmed, "Monitor started") {
-				parseMonitorResult(trimmed, pendingBgCalls, bgTasks)
 			}
 			if strings.Contains(trimmed, "<task-notification>") {
 				if tid := extractTaskNotificationID(trimmed); tid != "" {
