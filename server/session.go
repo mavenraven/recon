@@ -1271,6 +1271,9 @@ func (pt *processTree) descendantArgs(pid int) []string {
 const bgTaskDeadTTL = 2 * time.Minute
 
 func bgCommandFragments(cmd string) []string {
+	// ps renders embedded newlines as literal \012, so normalize
+	cmd = strings.ReplaceAll(cmd, "\n", `\012`)
+
 	first := cmd
 	if idx := strings.IndexByte(cmd, '|'); idx >= 0 {
 		first = cmd[:idx]
